@@ -163,11 +163,12 @@ func main() {
 	r.Path("/v1/logs").HandlerFunc(logsHandler()).Methods(http.MethodGet)
 
 	srv := &http.Server{
-		Handler: r,
-		Addr:    "0.0.0.0:9000",
+		Handler:     r,
+		Addr:        "0.0.0.0:9000",
+		IdleTimeout: 30 * time.Second,
+		// it will be without these timeouts due to streaming nature
 		// ReadTimeout: 5 * time.Second,
 		// WriteTimeout: 5 * time.Second,
-		IdleTimeout: 30 * time.Second,
 		// ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Println("[INFO] Server listening on 0.0.0.0:9000")
