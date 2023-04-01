@@ -27,5 +27,3 @@ EXPOSE 9000
 USER 65534
 
 ENTRYPOINT [ "/main" ]
-
-# docker image build --tag juliocesarmidia/kube-log-wrapper-api:latest .
