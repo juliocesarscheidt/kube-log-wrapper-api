@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"golang.org/x/exp/slices"
 	"log"
@@ -16,20 +17,31 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 var client *kubernetes.Clientset
+var runningInKubernetes bool
 var defaultSelectorKey string
 var defaultNamespace string
 var defaultTailLines string
 
 func init() {
+	// parameter for kubernetes client auth
+	runningInKubernetes, _ = strconv.ParseBool(getValueOrDefault(os.Getenv("RUNNING_IN_KUBERNETES"), "0").(string))
 	// kubernetes client
-	kubeconfig := getValueOrDefault(os.Getenv("KUBECONFIG"), "/root/.kube/config").(string)
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	var config *rest.Config
+	var err error
+	if runningInKubernetes {
+		// InClusterConfig uses the service account bound to this service
+		config, err = rest.InClusterConfig()
+	} else {
+		kubeconfigPath := getValueOrDefault(os.Getenv("KUBECONFIG"), os.Getenv("HOME")+"/.kube/config").(string)
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	}
 	if err != nil {
-		fmt.Printf("error %v", err)
+		fmt.Printf("Error creating kubernetes client: %v", err)
 		panic(err)
 	}
 	client, _ = kubernetes.NewForConfig(config)
@@ -141,9 +153,23 @@ func processRetrieveLogsToChannel(client *kubernetes.Clientset, logsChannel chan
 	return nil
 }
 
+func healthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Printf("Healthcheck")
+		response, _ := json.Marshal(&struct {
+			Status string `json:"status"`
+		}{
+			Status: "OK",
+		})
+		w.Write([]byte(string(response)))
+	}
+}
+
 func logsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
 		// retrieve parameters
 		selectorKey := getValueOrDefault(r.FormValue("selectorKey"), defaultSelectorKey).(string)
 		selectorValue := r.FormValue("selectorValue")
@@ -184,13 +210,15 @@ func logsHandler() http.HandlerFunc {
 func main() {
 	r := mux.NewRouter().StrictSlash(true)
 	r.Use(mux.CORSMethodMiddleware(r))
+	// add routes
+	r.Path("/v1/health").HandlerFunc(healthHandler()).Methods(http.MethodGet)
 	r.Path("/v1/logs").HandlerFunc(logsHandler()).Methods(http.MethodGet)
-
+	// create server
 	srv := &http.Server{
 		Handler:     r,
 		Addr:        "0.0.0.0:9000",
 		IdleTimeout: 30 * time.Second,
-		// it will not have without due to streaming
+		// it will not have other withouts due to streaming
 		// ReadTimeout: 5 * time.Second,
 		// WriteTimeout: 5 * time.Second,
 		// ReadHeaderTimeout: 10 * time.Second,
