@@ -26,6 +26,7 @@ var runningInKubernetes bool
 var defaultSelectorKey string
 var defaultNamespace string
 var defaultTailLines string
+var xApiKey string
 
 func init() {
 	// parameter for kubernetes client auth
@@ -49,6 +50,12 @@ func init() {
 	defaultSelectorKey = getValueOrDefault(os.Getenv("DEFAULT_SELECTOR_KEY"), "k8s-app").(string)
 	defaultNamespace = getValueOrDefault(os.Getenv("DEFAULT_NAMESPACE"), "default").(string)
 	defaultTailLines = getValueOrDefault(os.Getenv("DEFAULT_TAIL_LINES"), "1000").(string)
+	// api key
+	xApiKey = os.Getenv("X_API_KEY")
+}
+
+type HttpResponseMessage struct {
+	Message interface{} `json:"message"`
 }
 
 func getValueOrDefault(value interface{}, defaultValue interface{}) interface{} {
@@ -158,11 +165,7 @@ func healthHandler() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		w.WriteHeader(http.StatusOK)
 		fmt.Printf("Healthcheck")
-		response, _ := json.Marshal(&struct {
-			Status string `json:"status"`
-		}{
-			Status: "OK",
-		})
+		response, _ := json.Marshal(&HttpResponseMessage{Message: "Healthy"})
 		w.Write([]byte(string(response)))
 	}
 }
@@ -207,12 +210,34 @@ func logsHandler() http.HandlerFunc {
 	}
 }
 
+func authenticationMiddleware() mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenString := strings.Replace(r.Header.Get("Authorization"), "X-Api-Key ", "", 1)
+			if tokenString == "" {
+				fmt.Println("Unauthorized - Invalid Authorization Header")
+				http.Error(w, "Unauthorized - Invalid Authorization Header", http.StatusUnauthorized)
+				return
+			}
+			if tokenString != xApiKey {
+				fmt.Println("Unauthorized - Invalid Token")
+				http.Error(w, "Unauthorized - Invalid Token", http.StatusUnauthorized)
+				return
+			}
+			// call next handler
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func main() {
 	r := mux.NewRouter().StrictSlash(true)
 	r.Use(mux.CORSMethodMiddleware(r))
 	// add routes
 	r.Path("/v1/health").HandlerFunc(healthHandler()).Methods(http.MethodGet)
-	r.Path("/v1/logs").HandlerFunc(logsHandler()).Methods(http.MethodGet)
+	subRouterLogs := r.PathPrefix("/v1/logs").Subrouter()
+	subRouterLogs.Use(authenticationMiddleware())
+	subRouterLogs.Path("").HandlerFunc(logsHandler()).Methods(http.MethodGet)
 	// create server
 	srv := &http.Server{
 		Handler:     r,
