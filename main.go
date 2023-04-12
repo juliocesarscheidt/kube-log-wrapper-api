@@ -20,61 +20,87 @@ import (
 )
 
 var client *kubernetes.Clientset
+var defaultSelectorKey string
+var defaultNamespace string
+var defaultTailLines string
 
 func init() {
-	var kubeconfig string
-	if os.Getenv("KUBECONFIG") != "" {
-		kubeconfig = os.Getenv("KUBECONFIG")
-	} else {
-		kubeconfig = "/root/.kube/config"
-	}
+	// kubernetes client
+	kubeconfig := getValueOrDefault(os.Getenv("KUBECONFIG"), "/root/.kube/config").(string)
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		fmt.Printf("error %v", err)
 		panic(err)
 	}
 	client, _ = kubernetes.NewForConfig(config)
+	// parameters for logs
+	defaultSelectorKey = getValueOrDefault(os.Getenv("DEFAULT_SELECTOR_KEY"), "k8s-app").(string)
+	defaultNamespace = getValueOrDefault(os.Getenv("DEFAULT_NAMESPACE"), "default").(string)
+	defaultTailLines = getValueOrDefault(os.Getenv("DEFAULT_TAIL_LINES"), "1000").(string)
 }
 
 func getValueOrDefault(value interface{}, defaultValue interface{}) interface{} {
-	if value == "" {
+	if value.(string) == "" {
 		return defaultValue
 	}
 	return value
 }
 
-func fetchPodContainerNamesFromSelector(client *kubernetes.Clientset, namespace string, appLabel string) ([]string, []string, error) {
+func stringContains(sourceString string, targetStrings ...string) bool {
+	for _, str := range targetStrings {
+		if strings.Contains(sourceString, str) {
+			return true
+		}
+	}
+	return false
+}
+
+func sliceContains(sourceSlice []string, targetStrings ...string) bool {
+	for _, str := range targetStrings {
+		if slices.Contains(sourceSlice, str) {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchContainerNamesFromLabel(client *kubernetes.Clientset, namespace string,
+	label string) ([]string, []string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: appLabel})
+	// retrieve pods using label selector
+	opts := metav1.ListOptions{LabelSelector: label}
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, opts)
 	if err != nil {
-		fmt.Printf("error %v\n", err)
+		fmt.Printf("Error retrieving pods: %v\n", err)
 		return nil, nil, err
 	}
-
 	podNames := []string{}
 	containerNames := []string{}
+	iterationPodsCounter := 0
 	for _, pod := range pods.Items {
-		for _, container := range pod.Spec.Containers {
-			containerName := container.Name
-			if !slices.Contains(containerNames, containerName) &&
-				!strings.Contains(containerName, "sidecar") &&
-				!strings.Contains(containerName, "istio-proxy") {
+		// only retrieve container names in the first iteration,
+		// as the other pods for this app will have the same containers
+		if iterationPodsCounter == 0 {
+			for _, container := range pod.Spec.Containers {
+				containerName := container.Name
+				if sliceContains(containerNames, containerName) ||
+					stringContains(containerName, "sidecar", "proxy") {
+					continue
+				}
 				containerNames = append(containerNames, containerName)
 			}
+			iterationPodsCounter = iterationPodsCounter + 1
 		}
 		podNames = append(podNames, pod.Name)
 	}
-
 	return podNames, containerNames, nil
 }
 
-func fetchPodContainerLogs(client *kubernetes.Clientset, logsChannel chan string, namespace string,
-	podNames []string, containerName string, tailLines int64) {
-
+func fetchPodsContainerLogs(client *kubernetes.Clientset, logsChannel chan string,
+	namespace string, podNames []string, containerName string, tailLines int64) {
 	ctx := context.Background()
-	podLogOpts := &corev1.PodLogOptions{
+	opts := &corev1.PodLogOptions{
 		Container:    containerName,
 		Follow:       true,
 		SinceSeconds: nil,
@@ -82,36 +108,35 @@ func fetchPodContainerLogs(client *kubernetes.Clientset, logsChannel chan string
 		TailLines:    &tailLines,
 	}
 	for _, podName := range podNames {
-		go func(podName string, logsChannel chan string) {
+		// retrieve logs inside goroutines and send to channel
+		go func(podName, containerName string, logsChannel chan string) {
 			fmt.Printf("podName %s\n", podName)
 			fmt.Printf("containerName %s\n", containerName)
-
-			req := client.CoreV1().Pods(namespace).GetLogs(podName, podLogOpts)
+			// request to retrieve logs in streaming fashion
+			req := client.CoreV1().Pods(namespace).GetLogs(podName, opts)
 			logs, err := req.Stream(ctx)
 			if err != nil {
-				fmt.Printf("error %v\n", err)
+				fmt.Printf("Error retrieving logs: %v\n", err)
 				panic(err)
 			}
-
 			sc := bufio.NewScanner(logs)
 			for sc.Scan() {
 				logsChannel <- sc.Text()
 			}
-		}(podName, logsChannel)
+		}(podName, containerName, logsChannel)
 	}
 }
 
-func processFetchLogs(client *kubernetes.Clientset, logsChannel chan string, namespace string,
+func processRetrieveLogsToChannel(client *kubernetes.Clientset, logsChannel chan string, namespace string,
 	selectorKey string, selectorValue string, tailLines int64) error {
-
-	appLabel := fmt.Sprintf("%s=%s", selectorKey, selectorValue)
-	fmt.Println(appLabel)
-	podNames, containerNames, err := fetchPodContainerNamesFromSelector(client, namespace, appLabel)
+	label := fmt.Sprintf("%s=%s", selectorKey, selectorValue)
+	fmt.Printf("Using label %s\n", label)
+	podNames, containerNames, err := fetchContainerNamesFromLabel(client, namespace, label)
 	if err != nil {
 		return err
 	}
 	for _, containerName := range containerNames {
-		fetchPodContainerLogs(client, logsChannel, namespace, podNames, containerName, tailLines)
+		fetchPodsContainerLogs(client, logsChannel, namespace, podNames, containerName, tailLines)
 	}
 	return nil
 }
@@ -119,40 +144,39 @@ func processFetchLogs(client *kubernetes.Clientset, logsChannel chan string, nam
 func logsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-
-		selectorKey := getValueOrDefault(r.FormValue("selector_key"), "app").(string)
-		selectorValue := r.FormValue("selector_value")
+		// retrieve parameters
+		selectorKey := getValueOrDefault(r.FormValue("selectorKey"), defaultSelectorKey).(string)
+		selectorValue := r.FormValue("selectorValue")
 		if selectorValue == "" {
-			http.Error(w, "missing selector value", http.StatusBadRequest)
+			http.Error(w, "Missing selector value", http.StatusBadRequest)
 			return
 		}
-		namespace := getValueOrDefault(r.FormValue("namespace"), "default").(string)
-		tailLines, _ := strconv.Atoi(getValueOrDefault(r.FormValue("tail_lines"), "1000").(string))
-
-		logsChannel := make(chan string)
-
-		err := processFetchLogs(client, logsChannel, namespace, selectorKey, selectorValue, int64(tailLines))
-		if err != nil {
-			fmt.Printf("error %v\n", err)
-			http.Error(w, "failed to retrieve pods", http.StatusInternalServerError)
-			return
-		}
-
+		namespace := getValueOrDefault(r.FormValue("namespace"), defaultNamespace).(string)
+		tailLines, _ := strconv.Atoi(getValueOrDefault(r.FormValue("tailLines"), defaultTailLines).(string))
+		// create writter flusher
 		writerFlusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "not flushable", http.StatusInternalServerError)
+			http.Error(w, "Not flushable", http.StatusInternalServerError)
 			return
 		}
+		// open channel to receive logs from multiple pods
+		logsChannel := make(chan string)
+		err := processRetrieveLogsToChannel(client, logsChannel, namespace,
+			selectorKey, selectorValue, int64(tailLines))
+		if err != nil {
+			fmt.Printf("Error retrieving logs: %v\n", err)
+			http.Error(w, "Failed to retrieve pods", http.StatusInternalServerError)
+			return
+		}
+		// start streaming logs
 		w.WriteHeader(http.StatusOK)
-
 		for text := range logsChannel {
 			if _, err := w.Write([]byte(fmt.Sprintf("%s\n", text))); err != nil {
-				fmt.Printf("error %v\n", err)
+				fmt.Printf("Error writing data: %v\n", err)
 				return
 			}
 			writerFlusher.Flush()
 		}
-
 		close(logsChannel)
 	}
 }
@@ -166,19 +190,11 @@ func main() {
 		Handler:     r,
 		Addr:        "0.0.0.0:9000",
 		IdleTimeout: 30 * time.Second,
-		// it will be without these timeouts due to streaming nature
+		// it will not have without due to streaming
 		// ReadTimeout: 5 * time.Second,
 		// WriteTimeout: 5 * time.Second,
 		// ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Println("[INFO] Server listening on 0.0.0.0:9000")
 	log.Fatal(srv.ListenAndServe())
-
-	// curl -N -s "http://localhost:9000/v1/logs?selector_key=app&selector_value=saquedigital&namespace=superdigital&tail_lines=1000"
-	// curl -N -s "http://localhost:9000/v1/logs?selector_value=saquedigital&namespace=superdigital"
-
-	// curl -N -s "http://localhost:9000/v1/logs?selector_key=app&selector_value=pod-metrics&namespace=amazon-cloudwatch&tail_lines=1000"
-
-	// curl -N -s "http://localhost:9000/v1/logs?selector_key=k8s-app&selector_value=kube-dns&namespace=kube-system&tail_lines=1000"
-	// curl -N -s "http://localhost:9000/v1/logs?selector_key=component&selector_value=etcd&namespace=kube-system&tail_lines=1000"
 }
