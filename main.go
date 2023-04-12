@@ -83,6 +83,26 @@ func sliceContains(sourceSlice []string, targetStrings ...string) bool {
 	return false
 }
 
+func authenticationMiddleware() mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenString := strings.Replace(r.Header.Get("Authorization"), "X-Api-Key ", "", 1)
+			if tokenString == "" {
+				fmt.Println("Unauthorized - Invalid Authorization Header")
+				http.Error(w, "Unauthorized - Invalid Authorization Header", http.StatusUnauthorized)
+				return
+			}
+			if tokenString != xApiKey {
+				fmt.Println("Unauthorized - Invalid Token")
+				http.Error(w, "Unauthorized - Invalid Token", http.StatusUnauthorized)
+				return
+			}
+			// call next handler
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func fetchContainerNamesFromLabel(client *kubernetes.Clientset, namespace string,
 	label string) ([]string, []string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -103,6 +123,7 @@ func fetchContainerNamesFromLabel(client *kubernetes.Clientset, namespace string
 		if iterationPodsCounter == 0 {
 			for _, container := range pod.Spec.Containers {
 				containerName := container.Name
+				// not fetching logs of sidecar/proxy containers
 				if sliceContains(containerNames, containerName) ||
 					stringContains(containerName, "sidecar", "proxy") {
 					continue
@@ -210,31 +231,12 @@ func logsHandler() http.HandlerFunc {
 	}
 }
 
-func authenticationMiddleware() mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tokenString := strings.Replace(r.Header.Get("Authorization"), "X-Api-Key ", "", 1)
-			if tokenString == "" {
-				fmt.Println("Unauthorized - Invalid Authorization Header")
-				http.Error(w, "Unauthorized - Invalid Authorization Header", http.StatusUnauthorized)
-				return
-			}
-			if tokenString != xApiKey {
-				fmt.Println("Unauthorized - Invalid Token")
-				http.Error(w, "Unauthorized - Invalid Token", http.StatusUnauthorized)
-				return
-			}
-			// call next handler
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 func main() {
 	r := mux.NewRouter().StrictSlash(true)
 	r.Use(mux.CORSMethodMiddleware(r))
 	// add routes
-	r.Path("/v1/health").HandlerFunc(healthHandler()).Methods(http.MethodGet)
+	subRouterHealth := r.PathPrefix("/v1/health").Subrouter()
+	subRouterHealth.Path("").HandlerFunc(healthHandler()).Methods(http.MethodGet)
 	subRouterLogs := r.PathPrefix("/v1/logs").Subrouter()
 	subRouterLogs.Use(authenticationMiddleware())
 	subRouterLogs.Path("").HandlerFunc(logsHandler()).Methods(http.MethodGet)

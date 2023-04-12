@@ -100,8 +100,9 @@ spec:
           env:
             - name: RUNNING_IN_KUBERNETES
               value: '1'
-            - name: X_API_KEY
-              value: '1vfof8KD$}AVf%XizGRhHBmism2iALC2&GNPYKo]N-O2HN1p'
+          envFrom:
+            - secretRef:
+                name: kube-log-wrapper-api-secrets
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       serviceAccountName: kube-log-wrapper-api-sa
