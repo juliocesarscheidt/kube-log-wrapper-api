@@ -21,12 +21,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-var client *kubernetes.Clientset
-var runningInKubernetes bool
-var defaultSelectorKey string
-var defaultNamespace string
-var defaultTailLines string
-var xApiKey string
+var (
+  client *kubernetes.Clientset
+  runningInKubernetes bool
+  defaultSelectorKey string
+  defaultNamespace string
+  defaultTailLines string
+  xApiKey string
+)
 
 func init() {
 	// parameter for kubernetes client auth
@@ -52,6 +54,9 @@ func init() {
 	defaultTailLines = getValueOrDefault(os.Getenv("DEFAULT_TAIL_LINES"), "1000").(string)
 	// api key
 	xApiKey = os.Getenv("X_API_KEY")
+	if xApiKey == "" {
+		log.Fatal("Missing X Api Key")
+	}
 }
 
 type HttpResponseMessage struct {
@@ -105,7 +110,7 @@ func authenticationMiddleware() mux.MiddlewareFunc {
 
 func fetchContainerNamesFromLabel(client *kubernetes.Clientset, namespace string,
 	label string) ([]string, []string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// retrieve pods using label selector
 	opts := metav1.ListOptions{LabelSelector: label}
@@ -116,11 +121,11 @@ func fetchContainerNamesFromLabel(client *kubernetes.Clientset, namespace string
 	}
 	podNames := []string{}
 	containerNames := []string{}
-	iterationPodsCounter := 0
+	checkContainers := true
 	for _, pod := range pods.Items {
 		// only retrieve container names in the first iteration,
 		// as the other pods for this app will have the same containers
-		if iterationPodsCounter == 0 {
+		if checkContainers {
 			for _, container := range pod.Spec.Containers {
 				containerName := container.Name
 				// not fetching logs of sidecar/proxy containers
@@ -130,7 +135,7 @@ func fetchContainerNamesFromLabel(client *kubernetes.Clientset, namespace string
 				}
 				containerNames = append(containerNames, containerName)
 			}
-			iterationPodsCounter = iterationPodsCounter + 1
+			checkContainers = false
 		}
 		podNames = append(podNames, pod.Name)
 	}
@@ -246,9 +251,6 @@ func main() {
 		Addr:        "0.0.0.0:9000",
 		IdleTimeout: 30 * time.Second,
 		// it will not have other withouts due to streaming
-		// ReadTimeout: 5 * time.Second,
-		// WriteTimeout: 5 * time.Second,
-		// ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Println("[INFO] Server listening on 0.0.0.0:9000")
 	log.Fatal(srv.ListenAndServe())
