@@ -1,14 +1,14 @@
 # Kube logs wrapper API
 
-Tiny API to fecth logs in streamming fashion from Kubernetes API made with Golang
+Tiny API made with Golang, to fetch logs as streaming from Kubernetes API
 
 ```bash
-export X_API_KEY='1vfof8KD$}AVf%XizGRhHBmism2iALC2&GNPYKo]N-O2HN1p'
+export X_API_KEY='$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%&*(){}[]+-' | fold -w 32 | head -n 1)'
 
-
+# run locally
 RUNNING_IN_KUBERNETES=0 go run main.go
 
-
+# run with docker
 docker image build --tag docker.io/juliocesarmidia/kube-log-wrapper-api:v1.0.0 .
 
 docker image push docker.io/juliocesarmidia/kube-log-wrapper-api:v1.0.0
@@ -26,8 +26,8 @@ docker container logs -f --tail 100 kube-log-wrapper-api
 
 docker container rm -f kube-log-wrapper-api
 
-
-# create a secret for CloudWatch sdk usage, with the AWS credentials
+# run with kubernetes
+# create a secret containing the X_API_KEY
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
@@ -62,12 +62,12 @@ curl -N -s --url "http://$SVC_IP/v1/health"
 
 curl -H "Authorization: X-Api-Key $X_API_KEY" -N -s --url "http://$SVC_IP/v1/logs?selectorKey=k8s-app&selectorValue=metrics-server&namespace=kube-system&tailLines=10"
 
-
+# clean up
 kubectl delete -f deployment.yaml
 kubectl delete secret kube-log-wrapper-api-secrets -n default
 
 
-
+# calling API
 # -N, --no-buffer     Disable buffering of the output stream
 # -s, --silent        Silent mode
 
