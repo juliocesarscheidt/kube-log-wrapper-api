@@ -250,7 +250,7 @@ func main() {
 		Handler:     r,
 		Addr:        "0.0.0.0:9000",
 		IdleTimeout: 30 * time.Second,
-		// it will not have other withouts due to streaming
+		// it will not have other timeouts due streaming of logs
 	}
 	fmt.Println("[INFO] Server listening on 0.0.0.0:9000")
 	log.Fatal(srv.ListenAndServe())
